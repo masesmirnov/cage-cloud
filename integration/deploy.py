@@ -1,16 +1,19 @@
+import gzip
 import hashlib
+import os
 import pwd
 import subprocess
+import tarfile
 import time
 import urllib.request
 from pathlib import Path
 
 from infra.common import run, sha256, write
 
-RELEASE = "https://github.com/masesmirnov/Claude-Cage/releases/download/v0.1.8-en.3/"
+RELEASE = "https://github.com/masesmirnov/Claude-Cage/releases/download/v0.1.8-en.4/"
 KIT = "cloud-linux-amd64.tar"
 FILES = {
-    KIT: "83dc15f0f7ccd7189045724965bf86d8622738b255091f65aa71bb8db6de075b",
+    KIT: "c96fa1f5e69fc03e692b325bf57f394b3020deeeae65e57e70e3070f579caf18",
     "lifecycle.sh": "5f65633b443f5fdfc455e1d06333ed953a47e5f319a389de4ec81180c4f2a13a",
 }
 USER = "cage"
@@ -21,6 +24,7 @@ UNIT = "cage-cloud-" + hashlib.sha256(str(CONFIG).encode()).hexdigest()[:16] + "
 CACHE = Path("/var/cache/infra/cage-cloud")
 SUBORDINATE = "231072-296607"
 APPARMOR = Path("/etc/apparmor.d/cage-rootlesskit")
+GUEST = ["deploy/cloud/Dockerfile.guest", "deploy/cloud/restore-apt-sources.sh", "internal/cage/apt-bootstrap.sh"]
 
 
 def account():
@@ -56,6 +60,38 @@ def download(name, expected):
     return target
 
 
+def script(user, binary, kind):
+    return run(["runuser", "-u", USER, "--", *environment(user), "CLAUDE_CAGE_CONFIG=" + str(HOST / "probe/config.json"), binary, "container-install-script", kind],
+               capture=True, cwd=HOME).stdout
+
+
+def update(user, kit):
+    with tarfile.open(kit) as archive:
+        files = {member.name.removeprefix("./"): archive.extractfile(member).read() for member in archive if member.isfile()}
+    contexts = list((HOST / "build").glob("build.*/context"))
+    changed = not contexts or any((context / Path(name).name).read_bytes() != files[name] for context in contexts for name in GUEST)
+    engine = UNIT.removesuffix(".service") + "-engine"
+    for target, source in ((UNIT, "cage-server.service"), (engine + ".service", "cage-container-engine.service")):
+        text = files[source].decode()
+        for old, new in (("%h/.claude-cage/container-engine", str(HOST / "engine")), ("%h/.claude-cage/config.json", str(CONFIG)),
+                         ("%h/.local/lib/cage", str(HOST / "bin")), ("cage-container-engine", engine)):
+            text = text.replace(old, new)
+        changed |= text != (HOME / ".config/systemd/user" / target).read_text()
+    probe = HOST / "bin/cage.new"
+    write(probe, gzip.decompress(files["cage.gz"]), 0o700)
+    os.chown(probe, user.pw_uid, user.pw_gid)
+    for kind in ["tools", "services"]:
+        changed |= script(user, HOST / "bin/cage", kind) != script(user, probe, kind)
+    if changed:
+        probe.unlink()
+        raise ValueError("cage-cloud: новый релиз меняет образ гостя или юниты служб, обновление этим компонентом не поддерживается")
+    systemctl(user, "stop", UNIT)
+    probe.replace(HOST / "bin/cage")
+    for path, data, mode in ((HOST / "bin/mihomo", gzip.decompress(files["mihomo.gz"]), 0o700), (HOST / "kit-id", FILES[KIT], 0o600)):
+        write(path, data, mode)
+        os.chown(path, user.pw_uid, user.pw_gid)
+
+
 def configure():
     user = account()
     for path in ["/etc/subuid", "/etc/subgid"]:
@@ -79,7 +115,7 @@ def configure():
     marker = HOST / "kit-id"
     if (HOST / "ready").exists():
         if marker.read_text() != FILES[KIT]:
-            raise ValueError("cage-cloud: обновление уже установленного Cage этим компонентом не поддерживается")
+            update(user, kit)
         systemctl(user, "start", UNIT)
         print("cage-cloud: Cage " + FILES[KIT][:12] + " уже установлен", flush=True)
         return
