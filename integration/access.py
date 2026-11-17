@@ -6,7 +6,7 @@ from infra.common import service_catalog, sha256, write, write_json
 from .deploy import HOME, HOST, UNIT, account, systemctl
 
 MARKER = Path("/etc/infra/claude-access-owned.json")
-TOKEN = Path("/etc/infra/claude-access/token")
+TOKEN = Path("/etc/cage-cloud/token")
 DROPIN = HOME / ".config/systemd/user" / (UNIT + ".d") / "infra-proxy.conf"
 
 
